@@ -1,12 +1,13 @@
 import React, { Component } from 'react';
-import { Button, Card, CardBody, CardSubtitle, CardTitle, Container, Input, InputGroup, InputGroupAddon, Navbar, NavbarBrand } from 'reactstrap';
-import ethers from 'ethers';
+import { Button, Card, CardBody, CardTitle, Collapse, DropdownToggle, DropdownMenu, DropdownItem, Input, InputGroup, InputGroupAddon, Navbar, NavbarBrand, Table, UncontrolledDropdown, } from 'reactstrap';
+import Web3 from 'web3';
 import pqueue from 'p-queue';
+import { pickBy, keys, get } from 'lodash';
 
 import './App.css';
 
 class App extends Component {
-  provider;
+  web3;
   subs = [];
   txqueue = new pqueue({ concurrency: 4 });
   blocks = 0;
@@ -15,96 +16,80 @@ class App extends Component {
     address: '0xA62142888ABa8370742bE823c1782D17A0389Da1',
     network: 'mainnet',
     probing: false,
-    txs: []
+    events: {},
+    open: {},
+    mappings: {}
   };
 
-  getProvider() {
-    if (!this.provider) {
-      this.provider = new ethers.providers.InfuraProvider();
+  getWeb3() {
+    if (!this.web3) {
+      this.web3 = new Web3(new Web3.providers.WebsocketProvider('wss://mainnet.infura.io/ws'));
     }
-    return this.provider;
-  }
-
-  async scanTx(hash) {
-    return this.txqueue.add(async () => {
-      console.log("tx: " + hash);
-      const tx = await this.getProvider().getTransaction(hash);
-      if (tx == null) {
-        console.log("trying again... " + hash);
-        return this.scanTx(hash);
-      } else {
-        if (tx.to === this.state.address) {
-          this.setState({
-            txs: [...this.state.txs, tx]
-          })
-        }
-      }
-    })
-  }
-
-  async scanBlock(blocknum) {
-    return this.txqueue.add(async () => {
-      console.log('block: ' + blocknum);
-      const block = await this.getProvider().getBlock(blocknum);
-      if (!block) {
-        console.log("skipping: " + blocknum);
-      } else {
-        this.blocks++;
-        if (this.blocks === 1) {
-          this.setState({ scanning: true });
-        }
-        return Promise.all(block.transactions.map(tx => this.scanTx(tx))).then(() => {
-          this.blocks--;
-          if (this.blocks === 0) {
-            this.setState({ scanning: false });
-          }
-        });
-      }
-    });
-  }
-
-  async scan() {
-    const provider = this.getProvider();
-    const cb = this.scanBlock.bind(this);
-    provider.on('block', cb);
-    this.subs.push(() => provider.removeListener('block', cb));
-
-    var current = await provider.getBlockNumber();
-    for (var i = 0; i < 20; i++) {
-      await this.scanBlock(current - i);
-    }
+    return this.web3;
   }
 
   async listen() {
     const { network, address } = this.state;
-    const provider = this.getProvider();
+    const web3 = this.getWeb3();
     const url = 'https://api' + (network !== 'mainnet' ? ('-' + network) : '') + '.etherscan.io/api?module=contract&action=getabi&apiKey=JTQN45M6IBIVJUVC5RIZSBGU3IV4STKF2Z&address=' + address;
+
+    const block = await web3.eth.getBlockNumber();
 
     console.log("TRYING...");;
     const json = await fetch(url).then(r => r.json());
     console.log(json);
     if (json.status === "1") {
       const abi = JSON.parse(json.result);
-      const contract = new ethers.Contract(address, abi, provider);
+      const contract = new web3.eth.Contract(abi, address);
       console.log("GOT IT", contract);
-      for (var event of Object.keys(contract.events)) {
-        console.log("EVENT: " + event);
-      }
+      contract.events.allEvents({
+        fromBlock: block - 4 * 60 * 15
+      }, (err, event) => {
+        var mapped = {
+          ___event: event.event,
+          ___block: event.blockNumber,
+          ___id: event.id,
+          ...pickBy(event.returnValues, (v, k) => isNaN(+k))
+        };
+        this.setState({
+          events: {
+            ...this.state.events,
+            [event.event]: [mapped, ...(this.state.events[event.event] || [])]
+          }
+        });
+      })
     }
   }
 
   async ens() {
-    const name = await this.getProvider().lookupAddress(this.state.address);
+    /*const name = await this.getWeb3().lookupAddress(this.state.address);
     console.log("Got name: " + name);
     this.setState({
       name
+    });*/
+  }
+
+  toggle(event) {
+    this.setState({
+      open: {
+        ...this.state.open,
+        [event]: !this.state.open[event]
+      }
+    });
+  }
+
+  componentDidMount() {
+    const mappings = JSON.parse(localStorage.getItem('mappings') || "{}");
+    console.log("MAPPINGS:", mappings);
+    this.setState({
+      mappings
     });
   }
 
   render() {
 
     const doProbe = () => {
-      this.ens();
+      //      this.ens();
       this.listen();
       this.setState({
         probing: true
@@ -128,6 +113,82 @@ class App extends Component {
       })
     };
 
+    const defaultFormat = (value) => {
+      if (typeof value === 'string' && value.startsWith('0x')) {
+        return value.slice(0, 8) + "..." + value.slice(-8);
+      } else {
+        return value.toString();
+      }
+    };
+
+    const formatEther = (value) => this.getWeb3().utils.fromWei(value, 'ether');
+
+    const formatString = (value) => this.getWeb3().utils.hexToString(value);
+
+    const formatTimestamp = (value) => new Date(value * 1000).toString();
+
+    const formats = {
+      default: defaultFormat,
+      ether: formatEther,
+      string: formatString,
+      timestamp: formatTimestamp,
+      skip: undefined
+    };
+
+    const setFormat = (event, key, format) => {
+      const mappings = {
+        ...this.state.mappings,
+        [this.state.address]: {
+          ...this.state.mappings[this.state.address],
+          [event]: {
+            ...this.state.mappings[this.state.address][event],
+            [key]: { key, format }
+          }
+        }
+      };
+      localStorage.setItem('mappings', JSON.stringify(mappings));
+      this.setState({
+        mappings
+      });
+    }
+
+    const eventTable = (key) => {
+      const events = this.state.events[key];
+      const columns = keys(events[0]).filter(k => !k.startsWith('___')).map(k => get(this.state.mappings, [this.state.address, key, k], { key: k, format: 'default' })).filter(c => !!formats[c.format]);
+
+      return (
+        <Table>
+          <thead>
+            <tr>
+              {columns.map(c => (
+                <td key={c.key}>
+                  <UncontrolledDropdown size="sm">
+                    <DropdownToggle caret>
+                      {c.key}
+                    </DropdownToggle>
+                    <DropdownMenu>
+                      {keys(formats).map(fmt => (
+                        <DropdownItem key={fmt} onClick={() => setFormat(key, c.key, fmt)}>
+                          {fmt}
+                        </DropdownItem>
+                      ))}
+                    </DropdownMenu>
+                  </UncontrolledDropdown>
+                </td>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {events.map(event => (
+              <tr key={event.___id}>
+                {columns.map(c => (<td key={event.__id + ":" + c.key}>{formats[c.format](event[c.key])}</td>))}
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      );
+    };
+
     const input = () => (
       <div>
         <InputGroup>
@@ -141,30 +202,26 @@ class App extends Component {
     const probe = () => (
       <div>
         <Button color="warning" onClick={reset}>Reset</Button>
-        <Card style={{ marginTop: '20px' }}>
-          <CardTitle>{this.state.address}</CardTitle>
-          <CardSubtitle>{this.state.name}</CardSubtitle>
-          <CardBody>
-            {this.state.scanning ? (<div>Scanning...</div>) : (<div>Done.</div>)}
-            {this.state.txs.map(tx => (
-              <div key={tx.hash}>
-                {tx.hash}
-              </div>
-            ))}
-          </CardBody>
-        </Card>
+        {keys(this.state.events).map(key => (
+          <Card key={key} style={{ marginTop: '10px' }}>
+            <CardTitle style={{ padding: '5px', textAlign: 'left' }}><div onClick={() => this.toggle(key)}>{key.substring(2)} - {this.state.events[key].length}</div></CardTitle>
+            <Collapse isOpen={this.state.open[key]}>
+              <CardBody> {eventTable(key)} </CardBody>
+            </Collapse>
+          </Card>
+        ))}
       </div>
     );
 
+
     return (
-      <Container className="App">
+      <div style={{ padding: '20px' }}>
         <Navbar color="light">
           <NavbarBrand >Ethereum Contract Probe</NavbarBrand>
         </Navbar>
 
         {this.state.probing ? probe() : input()}
-
-      </Container>
+      </div>
     );
   }
 }
