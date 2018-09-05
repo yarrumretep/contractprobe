@@ -1,7 +1,6 @@
 import React, { Component } from 'react';
 import { Button, Card, CardBody, CardTitle, Collapse, DropdownToggle, DropdownMenu, DropdownItem, Input, InputGroup, InputGroupAddon, Navbar, NavbarBrand, Table, UncontrolledDropdown, } from 'reactstrap';
 import Web3 from 'web3';
-import pqueue from 'p-queue';
 import { pickBy, keys, get } from 'lodash';
 
 import './App.css';
@@ -9,7 +8,6 @@ import './App.css';
 class App extends Component {
   web3;
   subs = [];
-  txqueue = new pqueue({ concurrency: 4 });
   blocks = 0;
 
   state = {
@@ -127,11 +125,14 @@ class App extends Component {
 
     const formatTimestamp = (value) => new Date(value * 1000).toString();
 
+    const formatAddress = (value) => (<a target="etherscan" href={"https://etherscan.io/address/" + value}>{value.slice(0, 8) + "..." + value.slice(-8)}</a>)
+
     const formats = {
       default: defaultFormat,
       ether: formatEther,
       string: formatString,
       timestamp: formatTimestamp,
+      address: formatAddress,
       skip: undefined
     };
 
@@ -141,7 +142,7 @@ class App extends Component {
         [this.state.address]: {
           ...this.state.mappings[this.state.address],
           [event]: {
-            ...this.state.mappings[this.state.address][event],
+            ...get(this.state.mappings, [this.state.address, event], {}),
             [key]: { key, format }
           }
         }
